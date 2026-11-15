@@ -3,6 +3,7 @@
 <title>Cheer on your crew · Hangry Mochi</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <style>
 /* Web cheer page for fans without an iPhone (Android, laptop). Same account, codes and voice cheers as the app. */
 .hidden{display:none!important}
@@ -27,6 +28,10 @@ button:disabled{opacity:.45;cursor:default}
 .tabs{display:flex;gap:8px;margin:16px 0 0}
 .tab{background:transparent;border:2px solid var(--forest);padding:10px 16px}
 .tab.on{background:var(--forest);color:#fff}
+#map{height:360px;border-radius:18px;margin:12px 0;z-index:0}
+.dot{background:var(--coral);color:var(--forest);font-weight:700;border-radius:999px;padding:2px 8px;border:2px solid #fff;white-space:nowrap;font-size:13px;box-shadow:0 1px 3px rgba(0,0,0,.3)}
+.dot.est{background:#fff;border-color:var(--coral)}
+select{width:100%;font:inherit;padding:10px 12px;border-radius:14px;border:1.5px solid #C9D3CD;background:#fff;color:var(--forest)}
 .runcard{background:#fff;border-radius:18px;padding:14px 16px;margin:10px 0;display:flex;justify-content:space-between;align-items:center;gap:12px}
 </style></head>
 <body><main>
@@ -71,6 +76,14 @@ button:disabled{opacity:.45;cursor:default}
   <p class="muted" id="crewsLine"></p>
   <div id="runList"></div>
   <p id="noRuns" class="muted">No Live run right now. This page checks every 10 seconds, so keep it open.</p>
+  <div class="card" id="aheadCard">
+    <h2 style="margin-top:0">🎙️ Voice cheer for a mile (race day)</h2>
+    <p class="muted">Record it now. It plays in their ears when they reach that mile on their next Live run or race day.</p>
+    <label for="aheadCrew">Crew</label><select id="aheadCrew"></select>
+    <label for="aheadTo">Runner</label><select id="aheadTo"></select>
+    <label for="aheadMile">Mile</label><select id="aheadMile"></select>
+    <div id="aheadSlot" style="margin-top:12px"></div>
+  </div>
   <p><button class="ghost small" id="addCode">Add another fan code</button> <button class="ghost small" id="signOut">Sign out</button></p>
 </section>
 
@@ -78,10 +91,11 @@ button:disabled{opacity:.45;cursor:default}
   <p><button class="ghost small" id="backBtn">‹ All runs</button></p>
   <h1 id="watchTitle">Live run</h1>
   <p class="muted" id="watchSub"></p>
+  <div id="map" class="hidden" role="img" aria-label="Course map with runners"></div>
+  <p class="muted hidden" id="mapNote"></p>
   <div id="lanes"></div>
-  <div class="card" id="voiceCard">
-    <h2 style="margin-top:0">🎙️ Voice cheer</h2>
-    <p class="muted" id="voiceHelp">Tap a runner above, then record up to 30 seconds. Listen back, then send it. It plays over their music.</p>
+  <div class="card" id="watchVoice"><h2 style="margin-top:0">🎙️ Voice cheer</h2><p class="muted">Tap a runner above, then record up to 30 seconds. Listen back, then send it. It plays over their music.</p><div id="watchSlot"></div></div>
+  <div id="voiceCard">
     <div class="row">
       <button id="recBtn" disabled>Record</button>
       <span id="recState" class="rec"></span>
@@ -98,6 +112,7 @@ button:disabled{opacity:.45;cursor:default}
 <nav><a href="./">Home</a><a href="privacy.html">Privacy policy</a><a href="support.html">Support</a></nav>
 </main>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
 // Public project values (the same ones the app ships with); row-level security protects the data.
 const sb = supabase.createClient('https://pubaundotfgqdvaetqam.supabase.co', 'sb_publishable_ICpKtJ3ohcHQVuyT23ZumA_Kg03fkIb');
@@ -191,6 +206,7 @@ async function loadCrews() {
 function stopPolls() { clearInterval(pollRuns); clearInterval(pollLanes); if (channel) { sb.removeChannel(channel); channel = null; } }
 function showRuns() {
   stopPolls(); show('runs');
+  voiceMode = 'ahead'; $('aheadSlot').append($('voiceCard')); setupAhead();
   $('crewsLine').textContent = 'Cheering for ' + crews.map((c) => c.name).join(', ');
   const check = async () => {
     const since = new Date(Date.now() - 10 * 3600 * 1000).toISOString();
@@ -217,10 +233,12 @@ function showRuns() {
 // ---------- watching ----------
 $('backBtn').onclick = () => showRuns();
 async function watch(runId, title) {
-  stopPolls(); show('watch'); picked = null; progress = {}; renderPicked();
+  stopPolls(); show('watch'); picked = null; progress = {};
+  voiceMode = 'live'; $('watchSlot').append($('voiceCard')); wavBlob = null; $('preview').classList.add('hidden'); $('voiceMsg').textContent = '';
   $('watchTitle').textContent = title;
-  const { data: run } = await sb.from('runs').select('id, crew_id, status, started_at, goal_distance_m').eq('id', runId).single();
-  current = run;
+  const { data: run } = await sb.from('runs').select('id, crew_id, status, started_at, goal_distance_m, race_mode, created_at').eq('id', runId).single();
+  current = run; renderPicked();
+  await setupMap(run);
   const { data: list } = await sb.from('crew_members').select('user_id, profiles(display_name)').eq('crew_id', run.crew_id);
   names = {}; (list || []).forEach((m) => (names[m.user_id] = (m.profiles && m.profiles.display_name) || 'Runner'));
   channel = sb.channel('run:' + runId, { config: { presence: { key: 'watch:' + me } } });
@@ -228,8 +246,10 @@ async function watch(runId, title) {
   channel.on('broadcast', { event: 'end' }, () => { current.status = 'finished'; renderLanes(); });
   channel.subscribe(async (s) => { if (s === 'SUBSCRIBED') await channel.track({ at: Date.now() }); });
   const load = async () => {
-    const { data } = await sb.from('run_participants').select('user_id, distance_m, finished').eq('run_id', runId);
-    (data || []).forEach((p) => (progress[p.user_id] = { meters: Math.max(Number(p.distance_m) || 0, (progress[p.user_id] || {}).meters || 0), finished: p.finished }));
+    const { data } = await sb.from('run_participants').select('*').eq('run_id', runId);
+    (data || []).forEach((p) => (progress[p.user_id] = { meters: Math.max(Number(p.distance_m) || 0, (progress[p.user_id] || {}).meters || 0), finished: p.finished,
+      lat: p.lat, lng: p.lng, locAt: p.loc_at ? Date.parse(p.loc_at) : 0, goal: p.goal_m, hidePace: !!p.hide_pace, startedAt: p.started_at ? Date.parse(p.started_at) : null }));
+    updateMap();
     const { data: r } = await sb.from('runs').select('status, started_at').eq('id', runId).single();
     if (r) { current.status = r.status; current.started_at = r.started_at; }
     renderLanes();
@@ -249,7 +269,9 @@ function renderLanes() {
     const who = document.createElement('div'); who.className = 'who';
     who.innerHTML = '<div class="name"></div><div class="sub"></div><div class="bar"><i></i></div>';
     who.querySelector('.name').textContent = names[id] + (id === me ? ' (you)' : '');
-    who.querySelector('.sub').textContent = miles + ' mi' + (p.finished ? ' · finished 🏁' : '');
+    const t0 = p.startedAt || (current.started_at ? Date.parse(current.started_at) : 0);
+    const pace = !p.finished && !p.hidePace && t0 && p.meters >= 400 ? (Date.now() - t0) / 1000 / (p.meters / MILE) : 0;
+    who.querySelector('.sub').textContent = miles + ' mi' + (pace ? ' · ' + Math.floor(pace / 60) + ':' + String(Math.round(pace % 60)).padStart(2, '0') + '/mi avg' : '') + (p.finished ? ' · finished 🏁' : '');
     who.querySelector('i').style.width = Math.min(100, goal ? (p.meters / goal) * 100 : 0) + '%';
     who.onclick = () => { if (id !== me) { picked = id; renderPicked(); renderLanes(); } };
     lane.append(who);
@@ -270,9 +292,31 @@ async function cheer(to, btn) {
 }
 
 // ---------- voice cheers: record (WAV, plays on iPhones), listen back, then send or delete ----------
-let rec = null, wavBlob = null;
+let rec = null, wavBlob = null, voiceMode = 'live';
+const aheadTarget = () => ({ crew: $('aheadCrew').value, to: $('aheadTo').value, mile: Number($('aheadMile').value) || 0 });
+async function setupAhead() {
+  $('aheadCrew').innerHTML = ''; crews.forEach((c) => $('aheadCrew').append(new Option(c.name, c.id)));
+  if (!$('aheadMile').options.length) { $('aheadMile').append(new Option('Pick a mile', '')); for (let m = 1; m <= 26; m++) $('aheadMile').append(new Option('Mile ' + m, m)); }
+  await loadAheadRunners();
+}
+async function loadAheadRunners() {
+  const crew = $('aheadCrew').value; $('aheadTo').innerHTML = '';
+  if (!crew) return renderPicked();
+  const { data } = await sb.from('crew_members').select('user_id, profiles(display_name)').eq('crew_id', crew);
+  $('aheadTo').append(new Option('Pick a runner', ''));
+  (data || []).filter((m) => m.user_id !== me).map((m) => ({ id: m.user_id, name: (m.profiles && m.profiles.display_name) || 'Runner' }))
+    .sort((a, b) => a.name.localeCompare(b.name)).forEach((r) => { names[r.id] = r.name; $('aheadTo').append(new Option(r.name, r.id)); });
+  renderPicked();
+}
+$('aheadCrew').onchange = loadAheadRunners; $('aheadTo').onchange = () => renderPicked(); $('aheadMile').onchange = () => renderPicked();
 function waitLeft(to) { try { const m = JSON.parse(localStorage.getItem('hm.voice.' + current.id) || '{}'); return Math.max(0, (m[to] || 0) + VOICE_WAIT_MS - Date.now()); } catch { return 0; } }
 function renderPicked() {
+  if (voiceMode === 'ahead') {
+    const a = aheadTarget(), ok = a.to && a.mile;
+    $('recBtn').disabled = !ok || !!rec;
+    $('recBtn').textContent = ok ? 'Record for ' + (names[a.to] || 'them') + ' · mile ' + a.mile : 'Pick a runner and a mile';
+    return;
+  }
   const live = current && current.status !== 'finished' && current.started_at;
   const left = picked ? waitLeft(picked) : 0;
   $('recBtn').disabled = !picked || !live || !!rec || left > 0;
@@ -308,6 +352,7 @@ function stopRec() {
 }
 $('discardBtn').onclick = () => { wavBlob = null; $('preview').classList.add('hidden'); };
 $('sendBtn').onclick = async () => {
+  if (voiceMode === 'ahead') return sendAhead();
   if (!wavBlob || !picked) return;
   const to = picked; $('sendBtn').disabled = true; msg($('voiceMsg'), 'Sending to ' + names[to] + '…', true);
   const path = current.id + '/' + Date.now() + '-' + Math.random().toString(36).slice(2, 8) + '.wav';
@@ -316,9 +361,75 @@ $('sendBtn').onclick = async () => {
   if (error) return msg($('voiceMsg'), "Couldn't send it. Check your signal and tap Send again.");
   await channel.send({ type: 'broadcast', event: 'voice', payload: { to, from: me, fromName: myName, path } });
   sb.rpc('send_cheer', { p_run: current.id, p_to: to });
+  sb.from('voice_cheers').insert({ crew_id: current.crew_id, run_id: current.id, from_user: me, to_user: to, path }).then(() => {}); // kept 7 days
   try { const m = JSON.parse(localStorage.getItem('hm.voice.' + current.id) || '{}'); m[to] = Date.now(); localStorage.setItem('hm.voice.' + current.id, JSON.stringify(m)); } catch {}
   wavBlob = null; $('preview').classList.add('hidden'); msg($('voiceMsg'), '✓ Sent to ' + names[to] + '!', true); renderPicked();
 };
+
+async function sendAhead() {
+  const a = aheadTarget(); if (!wavBlob || !a.to || !a.mile) return;
+  $('sendBtn').disabled = true; msg($('voiceMsg'), 'Saving for ' + names[a.to] + ' · mile ' + a.mile + '…', true);
+  const path = 'ahead/' + a.crew + '/' + Date.now() + '-' + Math.random().toString(36).slice(2, 8) + '.wav';
+  const up = await sb.storage.from('voice-cheers').upload(path, wavBlob, { contentType: 'audio/wav' });
+  const row = up.error ? up : await sb.from('voice_cheers').insert({ crew_id: a.crew, run_id: null, from_user: me, to_user: a.to, path, at_mile: a.mile });
+  $('sendBtn').disabled = false;
+  if (row.error) return msg($('voiceMsg'), "Couldn't save it. Check your signal and tap Send again.");
+  wavBlob = null; $('preview').classList.add('hidden'); msg($('voiceMsg'), '✓ Saved! It plays for ' + names[a.to] + ' at mile ' + a.mile + '.', true);
+}
+
+// ---------- fan map: the course (Seattle Marathon) + where each runner is ----------
+// Runners who turned on live location show where they are; everyone else is placed along the
+// course by their distance ("~"), so nobody's position is shared without their say-so.
+let map = null, layer = null, course = null;
+async function setupMap(run) {
+  $('map').classList.add('hidden'); $('mapNote').classList.add('hidden');
+  if (map) { map.remove(); map = null; }
+  course = null;
+  const day = new Date(run.created_at).toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+  // ?course=seattle shows the course on any run (for testing before race day).
+  if ((run.race_mode && day === '2026-11-29') || new URLSearchParams(location.search).get('course') === 'seattle') {
+    try { course = await (await fetch('course-seattle-2026.json')).json(); } catch {}
+    if (course) {
+      course.cum = [0]; for (let i = 1; i < course.line.length; i++) course.cum.push(course.cum[i - 1] + dist(course.line[i - 1], course.line[i]));
+      course.len = course.cum[course.cum.length - 1];
+    }
+  }
+}
+function dist(a, b) { const R = 6371000, r = (d) => d * Math.PI / 180, x = r(b[0] - a[0]), y = r(b[1] - a[1]);
+  const h = Math.sin(x / 2) ** 2 + Math.cos(r(a[0])) * Math.cos(r(b[0])) * Math.sin(y / 2) ** 2; return 2 * R * Math.asin(Math.sqrt(h)); }
+function alongCourse(m) { // a point `m` meters into the marathon, scaled to the drawn course
+  const want = Math.min(1, m / 42195) * course.len; let i = course.cum.findIndex((c) => c >= want); if (i <= 0) return course.line[0];
+  const f = (want - course.cum[i - 1]) / Math.max(1, course.cum[i] - course.cum[i - 1]), a = course.line[i - 1], b = course.line[i];
+  return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+}
+function updateMap() {
+  if (!current || typeof L === 'undefined') return;
+  const pts = [];
+  Object.keys(progress).filter((id) => names[id]).forEach((id) => {
+    const p = progress[id];
+    if (p.lat != null && p.lng != null && Date.now() - p.locAt < 3 * 60 * 1000) pts.push({ id, at: [p.lat, p.lng], est: false });
+    else if (course && p.meters > 0 && (!p.goal || p.goal >= 40000)) pts.push({ id, at: alongCourse(p.meters), est: true });
+  });
+  if (!course && !pts.length) return;
+  if (!map) {
+    $('map').classList.remove('hidden');
+    map = L.map('map', { zoomControl: true, attributionControl: true });
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+    if (course) {
+      const line = L.polyline(course.line, { color: '#F07355', weight: 4 }).addTo(map);
+      Object.entries(course.miles).forEach(([n, at]) => L.circleMarker(at, { radius: 3, color: '#14231C', weight: 1, fillOpacity: 1 }).bindTooltip('Mile ' + n).addTo(map));
+      (course.water || []).forEach((at) => L.circleMarker(at, { radius: 4, color: '#1F6FB2', fillOpacity: .8 }).bindTooltip('Water').addTo(map));
+      map.fitBounds(line.getBounds(), { padding: [10, 10] });
+    } else map.setView(pts[0].at, 14);
+    layer = L.layerGroup().addTo(map);
+    $('mapNote').textContent = 'Exact spots are runners sharing their location. "~" = placed by distance along the course (approximate).';
+    $('mapNote').classList.remove('hidden');
+    setTimeout(() => map.invalidateSize(), 50);
+  }
+  layer.clearLayers();
+  pts.forEach((q) => L.marker(q.at, { icon: L.divIcon({ className: '', html: '<span class="dot' + (q.est ? ' est' : '') + '">' + escapeHtml(names[q.id]) + (q.est ? ' ~' : '') + '</span>', iconAnchor: [10, 10] }) }).addTo(layer));
+}
+function escapeHtml(t) { return String(t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
 // Mono float samples → 16-bit PCM WAV at `outRate` (simple averaging resample), at most maxS seconds.
 function toWav(chunks, inRate, outRate, maxS) {
