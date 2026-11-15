@@ -24,6 +24,9 @@ button:disabled{opacity:.45;cursor:default}
 .err{color:#C2410C}
 .ok{color:var(--leaf)}
 .rec{color:#C2410C;font-weight:700}
+.tabs{display:flex;gap:8px;margin:16px 0 0}
+.tab{background:transparent;border:2px solid var(--forest);padding:10px 16px}
+.tab.on{background:var(--forest);color:#fff}
 .runcard{background:#fff;border-radius:18px;padding:14px 16px;margin:10px 0;display:flex;justify-content:space-between;align-items:center;gap:12px}
 </style></head>
 <body><main>
@@ -32,13 +35,24 @@ button:disabled{opacity:.45;cursor:default}
 <section id="signin">
   <h1>Cheer on your crew</h1>
   <p>No iPhone? Watch the Live run here, tap to cheer, and send voice cheers that play in the runner's ear.</p>
-  <div class="card">
+  <div class="tabs" role="tablist">
+    <button class="tab on" id="tabUp" role="tab" aria-selected="true">New here? Sign up</button>
+    <button class="tab" id="tabIn" role="tab" aria-selected="false">I have an account</button>
+  </div>
+  <div class="card" id="upCard">
     <label for="name">Your first name</label><input id="name" autocomplete="given-name" placeholder="e.g. Nicole">
     <label for="email">Email</label><input id="email" type="email" autocomplete="email" placeholder="you@example.com">
-    <label for="pw">Password (8+ characters)</label><input id="pw" type="password" autocomplete="current-password">
-    <p class="muted">Already have a Hangry Mochi account? Use the same email and password.</p>
-    <button id="signinBtn">Continue</button>
-    <p id="signinMsg" class="msg"></p>
+    <label for="pw">Create a password (8+ characters)</label><input id="pw" type="password" autocomplete="new-password">
+    <label for="upCode">Fan code from your runner</label><input id="upCode" autocapitalize="characters" placeholder="e.g. 971D50E04D">
+    <button id="upBtn">Sign up and start cheering</button>
+    <p id="upMsg" class="msg"></p>
+  </div>
+  <div class="card hidden" id="inCard">
+    <label for="inEmail">Email</label><input id="inEmail" type="email" autocomplete="email" placeholder="you@example.com">
+    <label for="inPw">Password</label><input id="inPw" type="password" autocomplete="current-password">
+    <p class="muted">Same email and password as the Hangry Mochi app.</p>
+    <button id="inBtn">Sign in</button>
+    <p id="inMsg" class="msg"></p>
   </div>
 </section>
 
@@ -47,7 +61,7 @@ button:disabled{opacity:.45;cursor:default}
   <p>Ask a runner for their crew's fan code (in the app: the lobby's "Invite fans to watch").</p>
   <div class="card">
     <label for="fancode">Fan code</label><input id="fancode" autocapitalize="characters" placeholder="e.g. 971D50E04D">
-    <button id="codeBtn">Join as a fan</button>
+    <button id="codeBtn">Join as a fan</button> <button class="ghost small hidden" id="codeBack">‹ Back to runs</button>
     <p id="codeMsg" class="msg"></p>
   </div>
 </section>
@@ -95,47 +109,74 @@ let pollRuns = null, pollLanes = null;
 function show(id) { ['signin', 'code', 'runs', 'watch'].forEach((s) => $(s).classList.toggle('hidden', s !== id)); }
 function msg(el, text, ok) { el.textContent = text; el.className = 'msg ' + (ok ? 'ok' : 'err'); }
 const urlCode = new URLSearchParams(location.search).get('code');
-if (urlCode) $('fancode').value = urlCode.toUpperCase();
+if (urlCode) { $('fancode').value = urlCode.toUpperCase(); $('upCode').value = urlCode.toUpperCase(); }
 
-// ---------- sign in ----------
-$('signinBtn').onclick = async () => {
-  const email = $('email').value.trim(), password = $('pw').value, name = $('name').value.trim();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length < 8) return msg($('signinMsg'), 'Add your email and a password of 8 or more characters.');
-  $('signinBtn').disabled = true;
-  let { error } = await sb.auth.signInWithPassword({ email, password });
-  if (error && /invalid login credentials/i.test(error.message)) {
-    if (!name) { $('signinBtn').disabled = false; return msg($('signinMsg'), 'New here? Add your first name too, so runners know who cheered.'); }
-    const res = await sb.auth.signUp({ email, password });
-    error = res.error;
+// ---------- sign up / sign in ----------
+function tab(up) {
+  $('tabUp').classList.toggle('on', up); $('tabIn').classList.toggle('on', !up);
+  $('tabUp').setAttribute('aria-selected', up); $('tabIn').setAttribute('aria-selected', !up);
+  $('upCard').classList.toggle('hidden', !up); $('inCard').classList.toggle('hidden', up);
+}
+$('tabUp').onclick = () => tab(true);
+$('tabIn').onclick = () => tab(false);
+const okEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+
+$('upBtn').onclick = async () => {
+  const name = $('name').value.trim(), email = $('email').value.trim(), password = $('pw').value, code = $('upCode').value.trim();
+  if (!name) return msg($('upMsg'), 'Add your first name, so runners know who cheered.');
+  if (!okEmail(email) || password.length < 8) return msg($('upMsg'), 'Add your email and a password of 8 or more characters.');
+  if (!code) return msg($('upMsg'), 'Add the fan code your runner sent you.');
+  $('upBtn').disabled = true;
+  let { error } = await sb.auth.signUp({ email, password });
+  if (error && /registered|exists/i.test(error.message)) {
+    $('upBtn').disabled = false;
+    tab(false); $('inEmail').value = email;
+    return msg($('inMsg'), 'You already have an account. Sign in here.', true);
   }
-  $('signinBtn').disabled = false;
-  if (error) return msg($('signinMsg'), "That didn't work. Check your email and password.");
+  if (error) { $('upBtn').disabled = false; return msg($('upMsg'), "That didn't work. Check your email and try again."); }
   const { data } = await sb.auth.getUser();
-  if (name && data.user) await sb.from('profiles').update({ display_name: name }).eq('id', data.user.id);
+  if (data.user) await sb.from('profiles').update({ display_name: name }).eq('id', data.user.id);
+  me = data.user && data.user.id;
+  const joined = await joinCode(code, $('upMsg'));
+  $('upBtn').disabled = false;
+  start(joined ? null : 'code');
+};
+
+$('inBtn').onclick = async () => {
+  const email = $('inEmail').value.trim(), password = $('inPw').value;
+  if (!okEmail(email) || !password) return msg($('inMsg'), 'Add your email and password.');
+  $('inBtn').disabled = true;
+  const { error } = await sb.auth.signInWithPassword({ email, password });
+  $('inBtn').disabled = false;
+  if (error) return msg($('inMsg'), "That email and password don't match. New here? Use Sign up.");
   start();
 };
 
-async function start() {
+async function start(goTo) {
   const { data } = await sb.auth.getUser();
   if (!data.user) return show('signin');
   me = data.user.id;
+  if (goTo === 'code') { await loadCrews(); return show('code'); }
+  // Opened from a runner's fan link while already signed in: join that crew quietly (once).
+  if (urlCode && !sessionStorage.getItem('usedCode')) { sessionStorage.setItem('usedCode', '1'); await joinCode(urlCode); }
   const { data: prof } = await sb.from('profiles').select('display_name').eq('id', me).maybeSingle();
   myName = (prof && prof.display_name) || 'A fan';
-  if (urlCode && !sessionStorage.getItem('usedCode')) { sessionStorage.setItem('usedCode', '1'); await joinCode(urlCode); }
   await loadCrews();
   if (!crews.length) return show('code');
   showRuns();
 }
 
 // ---------- fan code ----------
-async function joinCode(raw) {
+async function joinCode(raw, out) {
+  out = out || $('codeMsg');
   const code = raw.toUpperCase().replace(/O/g, '0').replace(/[^A-Z0-9]/g, '');
   const { error } = await sb.rpc('join_as_fan', { p_code: code });
-  if (error) { msg($('codeMsg'), /most fans/.test(error.message) ? 'That crew has the most fans it can hold.' : "That fan code didn't work. Check it with the runner."); return false; }
+  if (error) { msg(out, /most fans/.test(error.message) ? 'That crew has the most fans it can hold.' : "That fan code didn't work. Check it with the runner."); return false; }
   return true;
 }
 $('codeBtn').onclick = async () => { $('codeBtn').disabled = true; const ok = await joinCode($('fancode').value); $('codeBtn').disabled = false; if (ok) { await loadCrews(); showRuns(); } };
-$('addCode').onclick = () => { stopPolls(); show('code'); };
+$('addCode').onclick = () => { stopPolls(); $('codeBack').classList.remove('hidden'); show('code'); };
+$('codeBack').onclick = () => showRuns();
 $('signOut').onclick = async () => { stopPolls(); await sb.auth.signOut(); location.reload(); };
 
 async function loadCrews() {
