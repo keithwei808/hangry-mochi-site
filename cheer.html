@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cheer on your crew · Hangry Mochi</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<style>
+/* Web cheer page for fans without an iPhone (Android, laptop). Same account, codes and voice cheers as the app. */
+.hidden{display:none!important}
+label{display:block;font-weight:600;margin:12px 0 4px}
+input{width:100%;font:inherit;padding:12px 14px;border-radius:14px;border:1.5px solid #C9D3CD;background:#fff;color:var(--forest)}
+button{font:inherit;font-weight:700;border:0;border-radius:999px;padding:12px 20px;cursor:pointer;background:var(--coral);color:var(--forest)}
+button.ghost{background:transparent;border:2px solid var(--forest)}
+button.small{padding:8px 14px;font-size:15px}
+button:disabled{opacity:.45;cursor:default}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.lane{background:#fff;border-radius:18px;padding:14px 16px;margin:10px 0;display:flex;align-items:center;gap:12px}
+.lane .who{flex:1;min-width:0}
+.lane .name{font-weight:700;font-size:18px}
+.lane .sub{color:var(--muted);font-size:14px}
+.lane.picked{outline:3px solid var(--leaf)}
+.bar{height:8px;background:#E3EBE6;border-radius:8px;margin-top:6px;overflow:hidden}
+.bar>i{display:block;height:100%;background:var(--leaf)}
+.msg{font-weight:600;margin:10px 0}
+.err{color:#C2410C}
+.ok{color:var(--leaf)}
+.rec{color:#C2410C;font-weight:700}
+.runcard{background:#fff;border-radius:18px;padding:14px 16px;margin:10px 0;display:flex;justify-content:space-between;align-items:center;gap:12px}
+</style></head>
+<body><main>
+<header><div class="mochi" aria-hidden="true"></div><a href="./">Hangry Mochi</a></header>
+
+<section id="signin">
+  <h1>Cheer on your crew</h1>
+  <p>No iPhone? Watch the Live run here, tap to cheer, and send voice cheers that play in the runner's ear.</p>
+  <div class="card">
+    <label for="name">Your first name</label><input id="name" autocomplete="given-name" placeholder="e.g. Nicole">
+    <label for="email">Email</label><input id="email" type="email" autocomplete="email" placeholder="you@example.com">
+    <label for="pw">Password (8+ characters)</label><input id="pw" type="password" autocomplete="current-password">
+    <p class="muted">Already have a Hangry Mochi account? Use the same email and password.</p>
+    <button id="signinBtn">Continue</button>
+    <p id="signinMsg" class="msg"></p>
+  </div>
+</section>
+
+<section id="code" class="hidden">
+  <h1>Enter the fan code</h1>
+  <p>Ask a runner for their crew's fan code (in the app: the lobby's "Invite fans to watch").</p>
+  <div class="card">
+    <label for="fancode">Fan code</label><input id="fancode" autocapitalize="characters" placeholder="e.g. 971D50E04D">
+    <button id="codeBtn">Join as a fan</button>
+    <p id="codeMsg" class="msg"></p>
+  </div>
+</section>
+
+<section id="runs" class="hidden">
+  <h1>Live now</h1>
+  <p class="muted" id="crewsLine"></p>
+  <div id="runList"></div>
+  <p id="noRuns" class="muted">No Live run right now. This page checks every 10 seconds, so keep it open.</p>
+  <p><button class="ghost small" id="addCode">Add another fan code</button> <button class="ghost small" id="signOut">Sign out</button></p>
+</section>
+
+<section id="watch" class="hidden">
+  <p><button class="ghost small" id="backBtn">‹ All runs</button></p>
+  <h1 id="watchTitle">Live run</h1>
+  <p class="muted" id="watchSub"></p>
+  <div id="lanes"></div>
+  <div class="card" id="voiceCard">
+    <h2 style="margin-top:0">🎙️ Voice cheer</h2>
+    <p class="muted" id="voiceHelp">Tap a runner above, then record up to 30 seconds. Listen back, then send it. It plays over their music.</p>
+    <div class="row">
+      <button id="recBtn" disabled>Record</button>
+      <span id="recState" class="rec"></span>
+    </div>
+    <div id="preview" class="hidden" style="margin-top:12px">
+      <audio id="player" controls style="width:100%"></audio>
+      <div class="row" style="margin-top:8px"><button id="sendBtn">Send</button><button class="ghost" id="discardBtn">Delete</button></div>
+    </div>
+    <p id="voiceMsg" class="msg"></p>
+  </div>
+  <p class="muted">Tap cheers are unlimited. Voice cheers: one per runner every 30 seconds.</p>
+</section>
+
+<nav><a href="./">Home</a><a href="privacy.html">Privacy policy</a><a href="support.html">Support</a></nav>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script>
+// Public project values (the same ones the app ships with); row-level security protects the data.
+const sb = supabase.createClient('https://pubaundotfgqdvaetqam.supabase.co', 'sb_publishable_ICpKtJ3ohcHQVuyT23ZumA_Kg03fkIb');
+const $ = (id) => document.getElementById(id);
+const MILE = 1609.344, VOICE_MAX_S = 30, VOICE_WAIT_MS = 30000, RATE = 16000; // 30 s of 16 kHz mono WAV ≈ 0.96 MB (bucket allows 1 MB)
+let me = null, myName = 'A fan', crews = [], current = null, channel = null, names = {}, progress = {}, picked = null;
+let pollRuns = null, pollLanes = null;
+
+function show(id) { ['signin', 'code', 'runs', 'watch'].forEach((s) => $(s).classList.toggle('hidden', s !== id)); }
+function msg(el, text, ok) { el.textContent = text; el.className = 'msg ' + (ok ? 'ok' : 'err'); }
+const urlCode = new URLSearchParams(location.search).get('code');
+if (urlCode) $('fancode').value = urlCode.toUpperCase();
+
+// ---------- sign in ----------
+$('signinBtn').onclick = async () => {
+  const email = $('email').value.trim(), password = $('pw').value, name = $('name').value.trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length < 8) return msg($('signinMsg'), 'Add your email and a password of 8 or more characters.');
+  $('signinBtn').disabled = true;
+  let { error } = await sb.auth.signInWithPassword({ email, password });
+  if (error && /invalid login credentials/i.test(error.message)) {
+    if (!name) { $('signinBtn').disabled = false; return msg($('signinMsg'), 'New here? Add your first name too, so runners know who cheered.'); }
+    const res = await sb.auth.signUp({ email, password });
+    error = res.error;
+  }
+  $('signinBtn').disabled = false;
+  if (error) return msg($('signinMsg'), "That didn't work. Check your email and password.");
+  const { data } = await sb.auth.getUser();
+  if (name && data.user) await sb.from('profiles').update({ display_name: name }).eq('id', data.user.id);
+  start();
+};
+
+async function start() {
+  const { data } = await sb.auth.getUser();
+  if (!data.user) return show('signin');
+  me = data.user.id;
+  const { data: prof } = await sb.from('profiles').select('display_name').eq('id', me).maybeSingle();
+  myName = (prof && prof.display_name) || 'A fan';
+  if (urlCode && !sessionStorage.getItem('usedCode')) { sessionStorage.setItem('usedCode', '1'); await joinCode(urlCode); }
+  await loadCrews();
+  if (!crews.length) return show('code');
+  showRuns();
+}
+
+// ---------- fan code ----------
+async function joinCode(raw) {
+  const code = raw.toUpperCase().replace(/O/g, '0').replace(/[^A-Z0-9]/g, '');
+  const { error } = await sb.rpc('join_as_fan', { p_code: code });
+  if (error) { msg($('codeMsg'), /most fans/.test(error.message) ? 'That crew has the most fans it can hold.' : "That fan code didn't work. Check it with the runner."); return false; }
+  return true;
+}
+$('codeBtn').onclick = async () => { $('codeBtn').disabled = true; const ok = await joinCode($('fancode').value); $('codeBtn').disabled = false; if (ok) { await loadCrews(); showRuns(); } };
+$('addCode').onclick = () => { stopPolls(); show('code'); };
+$('signOut').onclick = async () => { stopPolls(); await sb.auth.signOut(); location.reload(); };
+
+async function loadCrews() {
+  const { data } = await sb.from('crew_fans').select('crew_id, crews(name)').eq('user_id', me);
+  crews = (data || []).map((r) => ({ id: r.crew_id, name: (r.crews && r.crews.name) || 'Crew' }));
+  // Runners can use this page too (crews they run in).
+  const { data: mine } = await sb.from('crew_members').select('crew_id, crews(name)').eq('user_id', me);
+  (mine || []).forEach((r) => { if (!crews.some((c) => c.id === r.crew_id)) crews.push({ id: r.crew_id, name: (r.crews && r.crews.name) || 'Crew' }); });
+}
+
+// ---------- live runs ----------
+function stopPolls() { clearInterval(pollRuns); clearInterval(pollLanes); if (channel) { sb.removeChannel(channel); channel = null; } }
+function showRuns() {
+  stopPolls(); show('runs');
+  $('crewsLine').textContent = 'Cheering for ' + crews.map((c) => c.name).join(', ');
+  const check = async () => {
+    const since = new Date(Date.now() - 10 * 3600 * 1000).toISOString();
+    const { data } = await sb.from('runs').select('id, crew_id, race_mode, status, host:profiles!started_by(display_name)')
+      .in('crew_id', crews.map((c) => c.id)).eq('mode', 'live').in('status', ['lobby', 'active']).gte('created_at', since)
+      .order('created_at', { ascending: false });
+    const runs = data || [];
+    $('noRuns').classList.toggle('hidden', runs.length > 0);
+    $('runList').innerHTML = '';
+    runs.forEach((r) => {
+      const div = document.createElement('div'); div.className = 'runcard';
+      const crew = crews.find((c) => c.id === r.crew_id);
+      const title = document.createElement('div');
+      title.innerHTML = '<b></b><div class="sub muted"></div>';
+      title.querySelector('b').textContent = ((r.host && r.host.display_name) || 'A runner') + "'s " + (r.race_mode ? 'Race day' : 'Live run');
+      title.querySelector('div').textContent = (crew ? crew.name : '') + (r.status === 'lobby' ? ' · starting soon' : ' · running now');
+      const b = document.createElement('button'); b.textContent = 'Watch'; b.onclick = () => watch(r.id, title.querySelector('b').textContent);
+      div.append(title, b); $('runList').append(div);
+    });
+  };
+  check(); pollRuns = setInterval(check, 10000);
+}
+
+// ---------- watching ----------
+$('backBtn').onclick = () => showRuns();
+async function watch(runId, title) {
+  stopPolls(); show('watch'); picked = null; progress = {}; renderPicked();
+  $('watchTitle').textContent = title;
+  const { data: run } = await sb.from('runs').select('id, crew_id, status, started_at, goal_distance_m').eq('id', runId).single();
+  current = run;
+  const { data: list } = await sb.from('crew_members').select('user_id, profiles(display_name)').eq('crew_id', run.crew_id);
+  names = {}; (list || []).forEach((m) => (names[m.user_id] = (m.profiles && m.profiles.display_name) || 'Runner'));
+  channel = sb.channel('run:' + runId, { config: { presence: { key: 'watch:' + me } } });
+  channel.on('broadcast', { event: 'progress' }, ({ payload }) => { progress[payload.userId] = { ...(progress[payload.userId] || {}), meters: payload.meters, finished: payload.finished }; renderLanes(); });
+  channel.on('broadcast', { event: 'end' }, () => { current.status = 'finished'; renderLanes(); });
+  channel.subscribe(async (s) => { if (s === 'SUBSCRIBED') await channel.track({ at: Date.now() }); });
+  const load = async () => {
+    const { data } = await sb.from('run_participants').select('user_id, distance_m, finished').eq('run_id', runId);
+    (data || []).forEach((p) => (progress[p.user_id] = { meters: Math.max(Number(p.distance_m) || 0, (progress[p.user_id] || {}).meters || 0), finished: p.finished }));
+    const { data: r } = await sb.from('runs').select('status, started_at').eq('id', runId).single();
+    if (r) { current.status = r.status; current.started_at = r.started_at; }
+    renderLanes();
+  };
+  load(); pollLanes = setInterval(load, 5000);
+}
+
+function renderLanes() {
+  const over = current.status === 'finished';
+  $('watchSub').textContent = over ? 'This run is over. Thanks for cheering!' : current.started_at ? 'Running now · tap a name to pick who to cheer' : 'Starting soon · cheers open at the start';
+  const goal = current.goal_distance_m || 0;
+  const ids = Object.keys(progress).filter((id) => names[id]).sort((a, b) => names[a].localeCompare(names[b])); // fixed order: no jumping lanes
+  $('lanes').innerHTML = '';
+  ids.forEach((id) => {
+    const p = progress[id], miles = (p.meters / MILE).toFixed(2);
+    const lane = document.createElement('div'); lane.className = 'lane' + (picked === id ? ' picked' : '');
+    const who = document.createElement('div'); who.className = 'who';
+    who.innerHTML = '<div class="name"></div><div class="sub"></div><div class="bar"><i></i></div>';
+    who.querySelector('.name').textContent = names[id] + (id === me ? ' (you)' : '');
+    who.querySelector('.sub').textContent = miles + ' mi' + (p.finished ? ' · finished 🏁' : '');
+    who.querySelector('i').style.width = Math.min(100, goal ? (p.meters / goal) * 100 : 0) + '%';
+    who.onclick = () => { if (id !== me) { picked = id; renderPicked(); renderLanes(); } };
+    lane.append(who);
+    if (id !== me && !over && current.started_at && !p.finished) {
+      const b = document.createElement('button'); b.className = 'small'; b.textContent = '📣 Cheer'; b.onclick = (e) => { e.stopPropagation(); cheer(id, b); };
+      lane.append(b);
+    }
+    $('lanes').append(lane);
+  });
+  if (!ids.length) $('lanes').innerHTML = '<p class="muted">No runners yet.</p>';
+}
+
+async function cheer(to, btn) {
+  btn.disabled = true;
+  await channel.send({ type: 'broadcast', event: 'cheer', payload: { to, from: me, fromName: myName } });
+  sb.rpc('send_cheer', { p_run: current.id, p_to: to });
+  btn.textContent = '✓ Cheered'; setTimeout(() => { btn.textContent = '📣 Cheer'; btn.disabled = false; }, 2500);
+}
+
+// ---------- voice cheers: record (WAV, plays on iPhones), listen back, then send or delete ----------
+let rec = null, wavBlob = null;
+function waitLeft(to) { try { const m = JSON.parse(localStorage.getItem('hm.voice.' + current.id) || '{}'); return Math.max(0, (m[to] || 0) + VOICE_WAIT_MS - Date.now()); } catch { return 0; } }
+function renderPicked() {
+  const live = current && current.status !== 'finished' && current.started_at;
+  const left = picked ? waitLeft(picked) : 0;
+  $('recBtn').disabled = !picked || !live || !!rec || left > 0;
+  $('recBtn').textContent = picked ? (left > 0 ? 'Next voice cheer for ' + names[picked] + ' in ' + Math.ceil(left / 1000) + 's' : 'Record for ' + names[picked]) : 'Record';
+  if (left > 0) setTimeout(renderPicked, 1000);
+}
+$('recBtn').onclick = async () => {
+  if (rec) return stopRec();
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaStreamSource(stream), node = ctx.createScriptProcessor(4096, 1, 1), chunks = [];
+    node.onaudioprocess = (e) => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+    src.connect(node); node.connect(ctx.destination);
+    const started = Date.now();
+    rec = { stream, ctx, node, src, chunks, started, timer: setInterval(() => {
+      const s = Math.floor((Date.now() - started) / 1000);
+      $('recState').textContent = '🔴 Recording ' + s + 's / 30s · tap to stop';
+      if (s >= VOICE_MAX_S) stopRec();
+    }, 250) };
+    $('recBtn').textContent = 'Stop'; $('recBtn').disabled = false; $('preview').classList.add('hidden'); $('voiceMsg').textContent = '';
+  } catch { msg($('voiceMsg'), 'Allow the microphone for this page, then try again.'); }
+};
+function stopRec() {
+  const r = rec; rec = null; clearInterval(r.timer);
+  r.src.disconnect(); r.node.disconnect(); r.stream.getTracks().forEach((t) => t.stop());
+  const inRate = r.ctx.sampleRate; r.ctx.close();
+  $('recState').textContent = '';
+  if (Date.now() - r.started < 700) { renderPicked(); return; }
+  wavBlob = toWav(r.chunks, inRate, RATE, VOICE_MAX_S);
+  $('player').src = URL.createObjectURL(wavBlob);
+  $('preview').classList.remove('hidden'); renderPicked();
+}
+$('discardBtn').onclick = () => { wavBlob = null; $('preview').classList.add('hidden'); };
+$('sendBtn').onclick = async () => {
+  if (!wavBlob || !picked) return;
+  const to = picked; $('sendBtn').disabled = true; msg($('voiceMsg'), 'Sending to ' + names[to] + '…', true);
+  const path = current.id + '/' + Date.now() + '-' + Math.random().toString(36).slice(2, 8) + '.wav';
+  const { error } = await sb.storage.from('voice-cheers').upload(path, wavBlob, { contentType: 'audio/wav' });
+  $('sendBtn').disabled = false;
+  if (error) return msg($('voiceMsg'), "Couldn't send it. Check your signal and tap Send again.");
+  await channel.send({ type: 'broadcast', event: 'voice', payload: { to, from: me, fromName: myName, path } });
+  sb.rpc('send_cheer', { p_run: current.id, p_to: to });
+  try { const m = JSON.parse(localStorage.getItem('hm.voice.' + current.id) || '{}'); m[to] = Date.now(); localStorage.setItem('hm.voice.' + current.id, JSON.stringify(m)); } catch {}
+  wavBlob = null; $('preview').classList.add('hidden'); msg($('voiceMsg'), '✓ Sent to ' + names[to] + '!', true); renderPicked();
+};
+
+// Mono float samples → 16-bit PCM WAV at `outRate` (simple averaging resample), at most maxS seconds.
+function toWav(chunks, inRate, outRate, maxS) {
+  const total = chunks.reduce((n, c) => n + c.length, 0), all = new Float32Array(total);
+  let o = 0; chunks.forEach((c) => { all.set(c, o); o += c.length; });
+  const ratio = inRate / outRate, n = Math.min(Math.floor(total / ratio), outRate * maxS);
+  const buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const w = (p, s) => { for (let i = 0; i < s.length; i++) v.setUint8(p + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+  v.setUint16(22, 1, true); v.setUint32(24, outRate, true); v.setUint32(28, outRate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, 'data'); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    const a = Math.floor(i * ratio), b = Math.min(total, Math.floor((i + 1) * ratio)); let s = 0;
+    for (let j = a; j < b; j++) s += all[j];
+    const x = Math.max(-1, Math.min(1, s / Math.max(1, b - a)));
+    v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7fff, true);
+  }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+start();
+</script>
+</body></html>
