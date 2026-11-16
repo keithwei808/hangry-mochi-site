@@ -78,7 +78,7 @@ select{width:100%;font:inherit;padding:10px 12px;border-radius:14px;border:1.5px
   <p id="noRuns" class="muted">No Live run right now. This page checks every 10 seconds, so keep it open.</p>
   <div class="card" id="aheadCard">
     <h2 style="margin-top:0">🎙️ Voice cheer for a mile (race day)</h2>
-    <p class="muted">Record it now. It plays in their ears when they reach that mile on their next Live run or race day.</p>
+    <p class="muted">Record it now. It plays in their ears when they reach that mile on their next long run (13+ miles) or race day.</p>
     <label for="aheadCrew">Crew</label><select id="aheadCrew"></select>
     <label for="aheadTo">Runner</label><select id="aheadTo"></select>
     <label for="aheadMile">Mile</label><select id="aheadMile"></select>
@@ -106,7 +106,7 @@ select{width:100%;font:inherit;padding:10px 12px;border-radius:14px;border:1.5px
     </div>
     <p id="voiceMsg" class="msg"></p>
   </div>
-  <p class="muted">Tap cheers are unlimited. Voice cheers: one per runner every 30 seconds.</p>
+  <p class="muted">Tap cheers are unlimited. Voice cheers: up to 3 per runner every 20 minutes.</p>
 </section>
 
 <nav><a href="./">Home</a><a href="privacy.html">Privacy policy</a><a href="support.html">Support</a></nav>
@@ -294,8 +294,11 @@ async function cheer(to, btn) {
 // ---------- voice cheers: record (WAV, plays on iPhones), listen back, then send or delete ----------
 let rec = null, wavBlob = null, voiceMode = 'live';
 const aheadTarget = () => ({ crew: $('aheadCrew').value, to: $('aheadTo').value, mile: Number($('aheadMile').value) || 0 });
+// Mile voice cheers recorded ahead: testing with the Hangry Testers crew first (Kirk, Nov 15).
+const aheadCrews = () => crews.filter((c) => /hangry testers/i.test(c.name || ''));
 async function setupAhead() {
-  $('aheadCrew').innerHTML = ''; crews.forEach((c) => $('aheadCrew').append(new Option(c.name, c.id)));
+  $('aheadCard').classList.toggle('hidden', aheadCrews().length === 0);
+  $('aheadCrew').innerHTML = ''; aheadCrews().forEach((c) => $('aheadCrew').append(new Option(c.name, c.id)));
   if (!$('aheadMile').options.length) { $('aheadMile').append(new Option('Pick a mile', '')); for (let m = 1; m <= 26; m++) $('aheadMile').append(new Option('Mile ' + m, m)); }
   await loadAheadRunners();
 }
@@ -309,7 +312,15 @@ async function loadAheadRunners() {
   renderPicked();
 }
 $('aheadCrew').onchange = loadAheadRunners; $('aheadTo').onchange = () => renderPicked(); $('aheadMile').onchange = () => renderPicked();
-function waitLeft(to) { try { const m = JSON.parse(localStorage.getItem('hm.voice.' + current.id) || '{}'); return Math.max(0, (m[to] || 0) + VOICE_WAIT_MS - Date.now()); } catch { return 0; } }
+// 30 s between voice cheers to the same runner, and at most 3 per runner every 20 minutes (Kirk, Nov 15).
+function waitLeft(to) {
+  try {
+    const m = JSON.parse(localStorage.getItem('hm.voice.' + current.id) || '{}'), now = Date.now();
+    const times = (JSON.parse(localStorage.getItem('hm.voiceTimes.' + current.id) || '{}')[to] || []).filter((t) => t + 1200000 > now).sort((a, b) => a - b);
+    const burst = times.length >= 3 ? times[times.length - 3] + 1200000 - now : 0;
+    return Math.max(0, (m[to] || 0) + VOICE_WAIT_MS - now, burst);
+  } catch { return 0; }
+}
 function renderPicked() {
   if (voiceMode === 'ahead') {
     const a = aheadTarget(), ok = a.to && a.mile;
@@ -320,7 +331,7 @@ function renderPicked() {
   const live = current && current.status !== 'finished' && current.started_at;
   const left = picked ? waitLeft(picked) : 0;
   $('recBtn').disabled = !picked || !live || !!rec || left > 0;
-  $('recBtn').textContent = picked ? (left > 0 ? 'Next voice cheer for ' + names[picked] + ' in ' + Math.ceil(left / 1000) + 's' : 'Record for ' + names[picked]) : 'Record';
+  $('recBtn').textContent = picked ? (left > 0 ? 'Next voice cheer for ' + names[picked] + ' in ' + (left > 60000 ? Math.ceil(left / 60000) + ' min' : Math.ceil(left / 1000) + 's') : 'Record for ' + names[picked]) : 'Record';
   if (left > 0) setTimeout(renderPicked, 1000);
 }
 $('recBtn').onclick = async () => {
@@ -363,6 +374,7 @@ $('sendBtn').onclick = async () => {
   sb.rpc('send_cheer', { p_run: current.id, p_to: to });
   sb.from('voice_cheers').insert({ crew_id: current.crew_id, run_id: current.id, from_user: me, to_user: to, path }).then(() => {}); // kept 7 days
   try { const m = JSON.parse(localStorage.getItem('hm.voice.' + current.id) || '{}'); m[to] = Date.now(); localStorage.setItem('hm.voice.' + current.id, JSON.stringify(m)); } catch {}
+  try { const k = 'hm.voiceTimes.' + current.id, t = JSON.parse(localStorage.getItem(k) || '{}'); t[to] = (t[to] || []).filter((x) => x + 1200000 > Date.now()).concat(Date.now()); localStorage.setItem(k, JSON.stringify(t)); } catch {}
   wavBlob = null; $('preview').classList.add('hidden'); msg($('voiceMsg'), '✓ Sent to ' + names[to] + '!', true); renderPicked();
 };
 
