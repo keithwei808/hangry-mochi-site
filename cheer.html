@@ -36,6 +36,8 @@ select{width:100%;font:inherit;padding:10px 12px;border-radius:14px;border:1.5px
 </style></head>
 <body><main>
 <header><div class="mochi" aria-hidden="true"></div><a href="./">Hangry Mochi</a></header>
+<div class="card hidden" id="appBanner"><b>On an iPhone with the app?</b> Watch, cheer and see the map right in Hangry Mochi.
+  <div class="row" style="margin-top:10px"><a id="openApp" href="hangrymochi://"><button class="small">Open in the app</button></a><a id="getApp" href="#"><button class="small ghost">Get the app</button></a></div></div>
 
 <section id="signin">
   <h1>Cheer on your crew</h1>
@@ -117,6 +119,15 @@ select{width:100%;font:inherit;padding:10px 12px;border-radius:14px;border:1.5px
 // Public project values (the same ones the app ships with); row-level security protects the data.
 const sb = supabase.createClient('https://pubaundotfgqdvaetqam.supabase.co', 'sb_publishable_ICpKtJ3ohcHQVuyT23ZumA_Kg03fkIb');
 const $ = (id) => document.getElementById(id);
+// iPhone visitors: offer the app (one link works for everyone, Kirk Nov 17). Swap to the App Store
+// link once 1.0 is released.
+const GET_APP = 'https://testflight.apple.com/join/rQhQy5m3';
+if (/iPhone|iPad|iPod/.test(navigator.userAgent)) { $('appBanner').classList.remove('hidden'); $('getApp').href = GET_APP; }
+// Current pace (Rachel, Nov 17): newest distance vs one 45 s – 4 min older; same rules as the app.
+const hist = {};
+function noteDistance(id, m) { const l = hist[id] || (hist[id] = []); const last = l[l.length - 1]; if (last && m <= last.m) return; const t = Date.now(); l.push({ t, m }); while (l.length > 2 && t - l[0].t > 240000) l.shift(); }
+function currentPace(id) { const l = hist[id]; if (!l || l.length < 2) return 0; const b = l[l.length - 1]; if (Date.now() - b.t > 90000) return 0; const a = l.find((s) => b.t - s.t <= 240000); const secs = (b.t - a.t) / 1000, m = b.m - a.m; if (secs < 45 || m < 120) return 0; const spm = secs / (m / MILE); return spm >= 180 && spm <= 3600 ? spm : 0; }
+function paceText(spm) { const s = Math.round(spm); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0') + '/mi'; }
 const MILE = 1609.344, VOICE_MAX_S = 30, VOICE_WAIT_MS = 30000, RATE = 16000; // 30 s of 16 kHz mono WAV ≈ 0.96 MB (bucket allows 1 MB)
 let me = null, myName = 'A fan', crews = [], current = null, channel = null, names = {}, progress = {}, picked = null;
 let pollRuns = null, pollLanes = null;
@@ -242,13 +253,14 @@ async function watch(runId, title) {
   const { data: list } = await sb.from('crew_members').select('user_id, profiles(display_name)').eq('crew_id', run.crew_id);
   names = {}; (list || []).forEach((m) => (names[m.user_id] = (m.profiles && m.profiles.display_name) || 'Runner'));
   channel = sb.channel('run:' + runId, { config: { presence: { key: 'watch:' + me } } });
-  channel.on('broadcast', { event: 'progress' }, ({ payload }) => { progress[payload.userId] = { ...(progress[payload.userId] || {}), meters: payload.meters, finished: payload.finished }; renderLanes(); });
+  channel.on('broadcast', { event: 'progress' }, ({ payload }) => { progress[payload.userId] = { ...(progress[payload.userId] || {}), meters: payload.meters, finished: payload.finished }; noteDistance(payload.userId, payload.meters); renderLanes(); });
   channel.on('broadcast', { event: 'end' }, () => { current.status = 'finished'; renderLanes(); });
   channel.subscribe(async (s) => { if (s === 'SUBSCRIBED') await channel.track({ at: Date.now() }); });
   const load = async () => {
     const { data } = await sb.from('run_participants').select('*').eq('run_id', runId);
     (data || []).forEach((p) => (progress[p.user_id] = { meters: Math.max(Number(p.distance_m) || 0, (progress[p.user_id] || {}).meters || 0), finished: p.finished,
       lat: p.lat, lng: p.lng, locAt: p.loc_at ? Date.parse(p.loc_at) : 0, goal: p.goal_m, hidePace: !!p.hide_pace, startedAt: p.started_at ? Date.parse(p.started_at) : null }));
+    Object.keys(progress).forEach((id) => noteDistance(id, progress[id].meters));
     updateMap();
     const { data: r } = await sb.from('runs').select('status, started_at').eq('id', runId).single();
     if (r) { current.status = r.status; current.started_at = r.started_at; }
@@ -274,7 +286,8 @@ function renderLanes() {
     who.querySelector('.name').textContent = names[id] + (id === me ? ' (you)' : '');
     const t0 = p.startedAt || (current.started_at ? Date.parse(current.started_at) : 0);
     const pace = !p.finished && !p.hidePace && t0 && p.meters >= 400 ? (Date.now() - t0) / 1000 / (p.meters / MILE) : 0;
-    who.querySelector('.sub').textContent = miles + ' mi' + (pace ? ' · ' + Math.floor(pace / 60) + ':' + String(Math.round(pace % 60)).padStart(2, '0') + '/mi avg' : '') + (p.finished ? ' · finished 🏁' : '');
+    const now = pace ? currentPace(id) : 0;
+    who.querySelector('.sub').textContent = miles + ' mi' + (now ? ' · now ' + paceText(now) : '') + (pace ? ' · ' + paceText(pace) + ' avg' : '') + (p.finished ? ' · finished 🏁' : '');
     who.querySelector('i').style.width = Math.min(100, goal ? (p.meters / goal) * 100 : 0) + '%';
     who.onclick = () => { if (id !== me) { picked = id; renderPicked(); renderLanes(); } };
     lane.append(who);
@@ -433,7 +446,7 @@ async function setupMap(run) {
   course = null;
   const day = new Date(run.created_at).toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
   // ?course=seattle shows the course on any run (for testing before race day).
-  if ((run.race_mode && day === '2026-11-29') || new URLSearchParams(location.search).get('course') === 'seattle') {
+  if ((run.race_mode && day <= '2026-11-29') || new URLSearchParams(location.search).get('course') === 'seattle') {
     try { course = await (await fetch('course-seattle-2026.json')).json(); } catch {}
     if (course) {
       course.cum = [0]; for (let i = 1; i < course.line.length; i++) course.cum.push(course.cum[i - 1] + dist(course.line[i - 1], course.line[i]));
