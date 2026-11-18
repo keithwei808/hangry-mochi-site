@@ -77,8 +77,8 @@ select{width:100%;font:inherit;padding:10px 12px;border-radius:14px;border:1.5px
   <div id="runList"></div>
   <p id="noRuns" class="muted">No Live run right now. This page checks every 10 seconds, so keep it open.</p>
   <div class="card" id="aheadCard">
-    <h2 style="margin-top:0">🎙️ Voice cheer for a mile (race day)</h2>
-    <p class="muted">Record it now. It plays in their ears when they reach that mile on their next long run (13+ miles) or race day.</p>
+    <h2 style="margin-top:0">🎙️ Record a mile cheer</h2>
+    <p class="muted">Pick a runner and a mile. It plays in their ears when they reach that mile on race day (or a run of 13+ miles). If they don't get that far, they hear it after the run.</p>
     <label for="aheadCrew">Crew</label><select id="aheadCrew"></select>
     <label for="aheadTo">Runner</label><select id="aheadTo"></select>
     <label for="aheadMile">Mile</label><select id="aheadMile"></select>
@@ -262,6 +262,9 @@ function renderLanes() {
   $('watchSub').textContent = over ? 'This run is over. Thanks for cheering!' : current.started_at ? 'Running now · tap a name to pick who to cheer' : 'Starting soon · cheers open at the start';
   const goal = current.goal_distance_m || 0;
   const ids = Object.keys(progress).filter((id) => names[id]).sort((a, b) => names[a].localeCompare(names[b])); // fixed order: no jumping lanes
+  // Only one runner to cheer: pick them, so Record isn't greyed out (Nicole, Nov 17).
+  const others = ids.filter((id) => id !== me);
+  if (!picked && others.length === 1) { picked = others[0]; setTimeout(renderPicked, 0); }
   $('lanes').innerHTML = '';
   ids.forEach((id) => {
     const p = progress[id], miles = (p.meters / MILE).toFixed(2);
@@ -294,8 +297,23 @@ async function cheer(to, btn) {
 // ---------- voice cheers: record (WAV, plays on iPhones), listen back, then send or delete ----------
 let rec = null, wavBlob = null, voiceMode = 'live';
 const aheadTarget = () => ({ crew: $('aheadCrew').value, to: $('aheadTo').value, mile: Number($('aheadMile').value) || 0 });
-// Mile voice cheers recorded ahead: testing with the Hangry Testers crew first (Kirk, Nov 15).
-const aheadCrews = () => crews.filter((c) => /hangry testers/i.test(c.name || ''));
+// Mile voice cheers recorded ahead: open to every crew (Nov 17).
+const aheadCrews = () => crews;
+// Miles a runner already passed on a Live run happening now are greyed out (Kirk, Nov 17).
+let passedMiles = {};
+async function loadPassed() {
+  const crew = $('aheadCrew').value; passedMiles = {};
+  if (crew) {
+    const since = new Date(Date.now() - 10 * 3600 * 1000).toISOString();
+    const { data } = await sb.from('runs').select('id, run_participants(user_id, distance_m)').eq('crew_id', crew).eq('mode', 'live').eq('status', 'active').gte('created_at', since);
+    (data || []).forEach((r) => (r.run_participants || []).forEach((p) => { passedMiles[p.user_id] = Math.max(passedMiles[p.user_id] || 0, Math.floor((Number(p.distance_m) || 0) / MILE)); }));
+  }
+  const to = $('aheadTo').value, gone = passedMiles[to] || 0;
+  [...$('aheadMile').options].forEach((o) => { const m = Number(o.value) || 0; o.disabled = m > 0 && m <= gone; o.textContent = m ? 'Mile ' + m + (m <= gone ? ' (already passed)' : '') : o.textContent; });
+  if ((Number($('aheadMile').value) || 0) && Number($('aheadMile').value) <= gone) $('aheadMile').value = '';
+  renderPicked();
+}
+setInterval(() => { if (voiceMode === 'ahead' && !$('aheadCard').classList.contains('hidden')) loadPassed(); }, 30000);
 async function setupAhead() {
   $('aheadCard').classList.toggle('hidden', aheadCrews().length === 0);
   $('aheadCrew').innerHTML = ''; aheadCrews().forEach((c) => $('aheadCrew').append(new Option(c.name, c.id)));
@@ -309,9 +327,9 @@ async function loadAheadRunners() {
   $('aheadTo').append(new Option('Pick a runner', ''));
   (data || []).filter((m) => m.user_id !== me).map((m) => ({ id: m.user_id, name: (m.profiles && m.profiles.display_name) || 'Runner' }))
     .sort((a, b) => a.name.localeCompare(b.name)).forEach((r) => { names[r.id] = r.name; $('aheadTo').append(new Option(r.name, r.id)); });
-  renderPicked();
+  loadPassed();
 }
-$('aheadCrew').onchange = loadAheadRunners; $('aheadTo').onchange = () => renderPicked(); $('aheadMile').onchange = () => renderPicked();
+$('aheadCrew').onchange = loadAheadRunners; $('aheadTo').onchange = () => loadPassed(); $('aheadMile').onchange = () => renderPicked();
 // 30 s between voice cheers to the same runner, and at most 3 per runner every 20 minutes (Kirk, Nov 15).
 function waitLeft(to) {
   try {
@@ -331,14 +349,24 @@ function renderPicked() {
   const live = current && current.status !== 'finished' && current.started_at;
   const left = picked ? waitLeft(picked) : 0;
   $('recBtn').disabled = !picked || !live || !!rec || left > 0;
-  $('recBtn').textContent = picked ? (left > 0 ? 'Next voice cheer for ' + names[picked] + ' in ' + (left > 60000 ? Math.ceil(left / 60000) + ' min' : Math.ceil(left / 1000) + 's') : 'Record for ' + names[picked]) : 'Record';
+  const wait = left > 60000 ? Math.ceil(left / 60000) + ' min' : Math.ceil(left / 1000) + 's';
+  $('recBtn').textContent = !live ? 'Voice cheers open when the run starts'
+    : !picked ? 'Tap a runner above first'
+    : left > 30000 ? 'You sent 3 in 20 min. Next one in ' + wait
+    : left > 0 ? 'Next voice cheer for ' + names[picked] + ' in ' + wait
+    : 'Record for ' + names[picked];
   if (left > 0) setTimeout(renderPicked, 1000);
 }
 $('recBtn').onclick = async () => {
   if (rec) return stopRec();
+  stopPreview();
+  // iPhone Safari: the audio context must be created and resumed during the tap itself. Created after
+  // the mic prompt, it stays "suspended", records silence, and Listen back says "Error" (Nicole, Nov 17).
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  try { ctx.resume(); } catch {}
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (ctx.state !== 'running') await ctx.resume().catch(() => {});
     const src = ctx.createMediaStreamSource(stream), node = ctx.createScriptProcessor(4096, 1, 1), chunks = [];
     node.onaudioprocess = (e) => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
     src.connect(node); node.connect(ctx.destination);
@@ -349,21 +377,26 @@ $('recBtn').onclick = async () => {
       if (s >= VOICE_MAX_S) stopRec();
     }, 250) };
     $('recBtn').textContent = 'Stop'; $('recBtn').disabled = false; $('preview').classList.add('hidden'); $('voiceMsg').textContent = '';
-  } catch { msg($('voiceMsg'), 'Allow the microphone for this page, then try again.'); }
+  } catch { try { ctx.close(); } catch {} msg($('voiceMsg'), 'Allow the microphone for this page, then try again.'); }
 };
+function stopPreview() { const p = $('player'); try { p.pause(); p.currentTime = 0; } catch {} }
 function stopRec() {
   const r = rec; rec = null; clearInterval(r.timer);
   r.src.disconnect(); r.node.disconnect(); r.stream.getTracks().forEach((t) => t.stop());
   const inRate = r.ctx.sampleRate; r.ctx.close();
   $('recState').textContent = '';
   if (Date.now() - r.started < 700) { renderPicked(); return; }
+  // Nothing captured, or only silence: say so instead of saving an empty clip.
+  const peak = r.chunks.reduce((m, c) => { for (let i = 0; i < c.length; i += 64) m = Math.max(m, Math.abs(c[i])); return m; }, 0);
+  if (!r.chunks.length || peak < 0.003) { renderPicked(); return msg($('voiceMsg'), "We didn't hear anything. Check the mic is allowed, then tap Record again."); }
   wavBlob = toWav(r.chunks, inRate, RATE, VOICE_MAX_S);
   $('player').src = URL.createObjectURL(wavBlob);
   $('preview').classList.remove('hidden'); renderPicked();
 }
-$('discardBtn').onclick = () => { wavBlob = null; $('preview').classList.add('hidden'); };
+$('discardBtn').onclick = () => { stopPreview(); wavBlob = null; $('preview').classList.add('hidden'); };
 $('sendBtn').onclick = async () => {
   if (voiceMode === 'ahead') return sendAhead();
+  stopPreview();
   if (!wavBlob || !picked) return;
   const to = picked; $('sendBtn').disabled = true; msg($('voiceMsg'), 'Sending to ' + names[to] + '…', true);
   const path = current.id + '/' + Date.now() + '-' + Math.random().toString(36).slice(2, 8) + '.wav';
@@ -379,6 +412,7 @@ $('sendBtn').onclick = async () => {
 };
 
 async function sendAhead() {
+  stopPreview();
   const a = aheadTarget(); if (!wavBlob || !a.to || !a.mile) return;
   $('sendBtn').disabled = true; msg($('voiceMsg'), 'Saving for ' + names[a.to] + ' · mile ' + a.mile + '…', true);
   const path = 'ahead/' + a.crew + '/' + Date.now() + '-' + Math.random().toString(36).slice(2, 8) + '.wav';
